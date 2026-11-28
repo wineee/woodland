@@ -82,11 +82,14 @@ if (woodland_window_switcher_is_active(server)) {
 
 `keyboard-shortcuts-inhibit` 生效时整条链都不进（`inhibited` 判定在 `handle_keybinding` 之前），所以全屏游戏里 `Alt+Tab` 不会被抢。
 
-## 5. 渲染
+## 5. 渲染与预览
 
-一块 cairo 画好的 `wlr_scene_buffer`，挂在自己的 `wlr_scene_tree`（scene 根的子节点，打开时 `raise_to_top`，所以盖在 layer 的 overlay 层之上）。
+`sw->tree`（scene 根的子节点，打开时 `raise_to_top`，盖在 layer 的 overlay 层之上）内部自下而上由三层构成：
+1. **半透明压暗遮罩**（`sw->backdrop`）：全输出布局的 `wlr_scene_rect`（`{0, 0, 0, 0.45f}`，在分数缩放下按各输出物理尺寸 `ceil` 补足，避免边缘漏 1px）；
+2. **临时预览层**（`sw->preview_tree`）：把当前高亮窗口的 `scene_tree` 临时 `reparent` 到该树内显示（同时在原父树原位下方放一个禁用的 `0×0` 占位 `dummy` 节点），最小化窗口也会临时 `set_enabled(true)` 展示预览但不改 `view->minimized`；切换步进或收起时精准归还到 `view->workspace->tree`（或新工作区）原 z 序与原可见态；
+3. **切换器面板**（`sw->panel` + `sw->row_icons` + `sw->shadow`）：一块 cairo 画好的 `wlr_scene_buffer` 搭配每行左侧 `18px` 应用图标（复用 `woodland_ssd_get_icon_buffer()`）。
 
-- **尺寸**：行高 30、内边距 6，宽度按最长一行的文本量（pango，夹在 260..560 之间），高度 = 内边距 × 2 + 可见行数 × 30。量的是**加过后缀的完整文本**，否则最小化那行会被 ellipsize 掉尾巴。
+- **尺寸**：行高 30、内边距 6，左侧预留 `18px` 图标与 `8px` 间距，宽度按最长一行的文本量（pango，夹在 260..560 之间），高度 = 内边距 × 2 + 可见行数 × 30。量的是**加过后缀的完整文本**，否则最小化那行会被 ellipsize 掉尾巴。
 - **可见行窗口**：候选 ≤ 9 行全画；多了只画 9 行，`scroll` 跟着高亮走（`switcher_clamp_scroll`）。
 - **最小化的行**：标题后加 `  (已最小化)` / `  (minimized)`，未高亮时文字 alpha 压到 0.55。只改 alpha、不另配一套颜色——配色有客户端覆盖 / 配色方案 / 配置文件三层来源，多一套就多一处要同步的常量。后缀拼进同一条 pango 文本，所以 `switcher_row_text()` 先按"给后缀留位置"截标题，不能直接 `snprintf("%s%s")`（长标题会把后缀截掉，而那条信息最不能丢）。
 - **配色**：读 `[appearance]`（treeland-appearance 写入的 `dark` / `accent_rgb`），没有就用内置浅色盘 + 蓝色高亮。和窗口菜单同一套取值逻辑，不是第二套主题。
@@ -204,9 +207,8 @@ WAYLAND_DISPLAY=wayland-0 grim /tmp/switcher.png
 
 ## 8. 已知取舍
 
-- **不做缩略图/图标**：只画标题。目标是"看得清在切谁"，不是复刻 treeland 的 switch-window。
-- **不做实时预览**：切换期间不把高亮窗口临时提到最上面（labwc 的 `preview`）。少一次 z 序抖动，也少一套"临时 reparent 再还原"的还原逻辑。
-- **最小化窗口进列表，但只是"进列表"**：面板上标 `(已最小化)` 并压暗，提交等于"恢复 + 聚焦"。
+- **只做应用图标 + 当前窗口临时抬升预览**：行左侧展示应用图标，当前高亮窗口临时抬升到半透明遮罩之上（最小化窗口临时置可见预览）；不做缩略图网格（卡片缩略图由多任务视图承担），也不提升其他关联 transient 子弹窗。
+- **最小化窗口进列表与预览**：面板上标 `(已最小化)` 并压暗行文字/未选中图标，选中预览时临时显示其画面但保持 `minimized` 标志不变，提交等于"恢复 + 聚焦"。
   没做的是"最小化一个窗口后自动把它从列表里隐形"那种语义（Windows 的 Alt+Tab 也保留它们），
   也没有"恢复后落到原来的位置"——`focus_view(raise=true)` 会把它抬到最上面，和点任务栏一致。
 - **候选上限 32**、可见 9 行。上限之外（真的开了 33 个窗口）的那些窗口这一轮切不到，下一轮从新的 z 序重新拍快照。

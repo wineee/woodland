@@ -305,7 +305,8 @@ static void view_raise_node(struct woodland_view *view)
         struct woodland_view *lowest_higher = NULL;
         struct woodland_view *v;
         wl_list_for_each_reverse(v, &view->server->views, link) {
-            if (v != view && v->workspace == view->workspace && v->mapped && v->scene_tree) {
+            if (v != view && v->workspace == view->workspace && v->mapped && v->scene_tree &&
+                v->scene_tree->node.parent == view->scene_tree->node.parent) {
                 if (woodland_view_get_layer(v) > target_layer) {
                     lowest_higher = v;
                     break;

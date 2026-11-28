@@ -159,9 +159,15 @@ static void check_workspace_membership(struct woodland_server *server,
             continue;
         }
         if (view->scene_tree->node.parent != view->workspace->tree) {
-            bad++;
-            bad_id = view->id;
-            snprintf(what, sizeof(what), "scene_tree not under workspace tree");
+            struct wlr_scene_tree *preview_tree = NULL;
+            struct woodland_view *preview =
+                woodland_window_switcher_preview_view(server, &preview_tree);
+            if (!(preview == view && preview_tree &&
+                  view->scene_tree->node.parent == preview_tree)) {
+                bad++;
+                bad_id = view->id;
+                snprintf(what, sizeof(what), "scene_tree not under workspace tree");
+            }
         }
     }
 
@@ -569,10 +575,12 @@ static void check_switcher(struct woodland_server *server,
     int n = woodland_window_switcher_snapshot(server, views,
                                               WOODLAND_SWITCHER_MAX_ITEMS, &selected);
     if (!woodland_window_switcher_is_active(server)) {
-        if (n != 0 || selected != -1) {
+        struct woodland_view *preview = woodland_window_switcher_preview_view(server, NULL);
+        if (n != 0 || selected != -1 || preview != NULL) {
             check->ok = false;
             set_text(check->actual, sizeof(check->actual),
-                     "inactive but snapshot still holds %d candidate(s)", n);
+                     "inactive but snapshot holds %d candidate(s), preview=%p", n,
+                     (const void *)preview);
         } else {
             set_text(check->actual, sizeof(check->actual), "inactive, snapshot empty");
         }

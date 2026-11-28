@@ -27,6 +27,7 @@
 struct woodland_server;
 struct woodland_view;
 struct woodland_json;
+struct wlr_scene_tree;
 
 /* 候选个数上限（面板最多画 WOODLAND_SWITCHER_MAX_ROWS 行，其余靠滚动） */
 #define WOODLAND_SWITCHER_MAX_ITEMS 32
@@ -87,6 +88,13 @@ int woodland_window_switcher_snapshot(const struct woodland_server *server,
 
 /** 导出状态（wctl get_tree 的 window_switcher 对象）。 */
 void woodland_window_switcher_status(struct woodland_server *server, struct woodland_json *out);
+
+/**
+ * 返回当前正被切换器临时托管预览的视图（未激活或无预览时返回 NULL）。
+ * 若 out_tree 非空，同时写入预览容器树指针，供 selfcheck 验证父节点归属。
+ */
+struct woodland_view *woodland_window_switcher_preview_view(
+    const struct woodland_server *server, struct wlr_scene_tree **out_tree);
 
 /* ==================== 纯逻辑（单测直接调，不建 display） ==================== */
 

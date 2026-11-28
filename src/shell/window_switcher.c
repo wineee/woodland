@@ -16,8 +16,9 @@
  *   2. **切换期间焦点不动**：我们只高亮，不逐个窗口真聚焦。少一次来回切换，
  *      也避免客户端收到一串 activated/inactivated 抖动。
  *   3. **渲染只依赖快照与配置**：面板是一块 cairo 画好的 buffer（左侧配应用图标），
- *      尺寸按行数与最长标题算，滚动窗口跟着高亮走。切换期间将非选中窗口临时
- *      设为高透明度，使当前选中窗口清晰凸显。
+ *      尺寸按行数与最长标题算，滚动窗口跟着高亮走。切换期间在面板下方铺一层
+ *      全输出半透明遮罩，并将当前选中窗口临时 reparent 到预览树上显示（最小化
+ *      窗口也临时置可见，不改 view->minimized），收起或切换时按占位节点精准还原。
  *
  * 键位与 focus_cycle 的分工见 window_switcher.h。
  */
@@ -37,10 +38,11 @@
 #include <wayland-server-protocol.h>
 #include <wlr/interfaces/wlr_buffer.h>
 #include <wlr/types/wlr_keyboard.h>
+#include <wlr/types/wlr_output.h>
+#include <wlr/types/wlr_output_layout.h>
 #include <wlr/util/box.h>
 #include <wlr/util/log.h>
 
-#include "effect.h"
 #include "focus.h"
 #include "icon.h"
 #include "multitask_view.h"
@@ -48,7 +50,6 @@
 #include "placement.h"
 #include "scene.h"
 #include "session_lock.h"
-#include "ssd.h"
 #include "trace.h"
 #include "util/json.h"
 #include "util/listener.h"
@@ -57,6 +58,7 @@
 #include "window_switcher.h"
 #include "woodland.h"
 #include "woodland_config.h"
+#include "workspace.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -69,10 +71,11 @@
 #define SWITCHER_ICON_GAP 8
 #define SWITCHER_MIN_WIDTH 260
 #define SWITCHER_MAX_WIDTH 560
-/* 非选中窗口临时半透明的不透明度（高透明度，凸显当前选中窗口） */
-#define SWITCHER_DIM_OPACITY 0.15f
 /* 一行的文本缓冲：标题 + 后缀，再长也没意义（面板最宽 560px 就 ellipsize 了） */
 #define SWITCHER_ROW_TEXT_MAX 256
+
+/* 全输出半透明压暗遮罩（预乘 RGBA），用于凸显抬升到遮罩之上的当前预览窗口 */
+static const float SWITCHER_BACKDROP_COLOR[4] = {0.0f, 0.0f, 0.0f, 0.45f};
 
 /* ==================== cairo 包装为 wlr_buffer ==================== */
 
@@ -150,13 +153,21 @@ static struct wlr_buffer *switcher_wrap_cairo_surface(cairo_surface_t *surf, int
 struct woodland_window_switcher {
     struct woodland_server *server;
     bool active;
-    /* 面板树：scene 根的子节点，打开时抬到最上面（盖住 layer 的 overlay 层） */
+    /* 面板树：scene 根的子节点，打开时抬到最上面（盖住 layer 的 overlay 层）；
+     * 自下而上依次为：backdrop < preview_tree < shadow < panel < row_icons */
     struct wlr_scene_tree *tree;
+    struct wlr_scene_rect *backdrop;
+    struct wlr_scene_tree *preview_tree;
     struct wlr_scene_buffer *panel;
     struct wlr_scene_buffer *row_icons[WOODLAND_SWITCHER_MAX_ROWS];
 #if WOODLAND_HAVE_EFFECTS
     struct wlr_scene_shadow *shadow;
 #endif
+    /* 临时抬升预览的窗口及其在原父树里的占位节点（用于精准还原 z 序与可见性） */
+    struct woodland_view *preview_view;
+    struct wlr_scene_node *preview_dummy;
+    struct wl_listener preview_destroy;
+    bool preview_was_enabled;
     /*
      * 只缓存"画出来的几何"，不缓存 `struct woodland_output *`。
      *
@@ -179,7 +190,6 @@ struct woodland_window_switcher {
      * 现算就分不出"真的变了"和"又发了一次"，每次都得整块重排重画。
      */
     bool minimized[WOODLAND_SWITCHER_MAX_ITEMS];
-    bool dimmed[WOODLAND_SWITCHER_MAX_ITEMS];
     int count;
     int selected; /* 高亮下标；-1 = 没有高亮 */
     int scroll;   /* 面板里第一行对应快照的哪一项（候选多于可见行时） */
@@ -638,6 +648,15 @@ static void switcher_render(struct woodland_window_switcher *sw)
         wlr_scene_node_set_position(&sw->panel->node, sw->x, sw->y);
         wlr_scene_node_set_enabled(&sw->panel->node, true);
     }
+    if (sw->backdrop) {
+        wlr_scene_node_lower_to_bottom(&sw->backdrop->node);
+    }
+    if (sw->preview_tree && sw->backdrop) {
+        wlr_scene_node_place_above(&sw->preview_tree->node, &sw->backdrop->node);
+    }
+    if (sw->panel && sw->preview_tree) {
+        wlr_scene_node_place_above(&sw->panel->node, &sw->preview_tree->node);
+    }
     for (int i = 0; i < rows; i++) {
         int idx = sw->scroll + i;
         if (idx < 0 || idx >= sw->count) {
@@ -709,6 +728,80 @@ static struct woodland_output *switcher_pick_output(struct woodland_window_switc
     return output;
 }
 
+static void switcher_update_backdrop(struct woodland_window_switcher *sw)
+{
+    if (!sw || !sw->backdrop || !sw->server) {
+        return;
+    }
+    struct wlr_box box = {0};
+    if (sw->server->output_layout) {
+        wlr_output_layout_get_box(sw->server->output_layout, NULL, &box);
+    }
+    if (sw->server->outputs.next) {
+        int max_x = box.x + box.width;
+        int max_y = box.y + box.height;
+        bool has_out = false;
+        struct woodland_output *out;
+        wl_list_for_each(out, &sw->server->outputs, link)
+        {
+            if (!out->wlr_output || out->destroying) {
+                continue;
+            }
+            struct wlr_box obox = {0};
+            if (sw->server->output_layout) {
+                wlr_output_layout_get_box(sw->server->output_layout, out->wlr_output, &obox);
+            }
+            if (obox.width <= 0 || obox.height <= 0) {
+                continue;
+            }
+            int w = obox.width;
+            int h = obox.height;
+            float scale = out->wlr_output->scale > 0.0f ? out->wlr_output->scale : 1.0f;
+            int phys_w = 0, phys_h = 0;
+            wlr_output_transformed_resolution(out->wlr_output, &phys_w, &phys_h);
+            int ceil_w = (int)ceil((double)phys_w / scale);
+            int ceil_h = (int)ceil((double)phys_h / scale);
+            if (ceil_w > w) {
+                w = ceil_w;
+            }
+            if (ceil_h > h) {
+                h = ceil_h;
+            }
+            if (!has_out) {
+                if (box.width <= 0 || box.height <= 0) {
+                    box.x = obox.x;
+                    box.y = obox.y;
+                    max_x = obox.x + w;
+                    max_y = obox.y + h;
+                }
+                has_out = true;
+            }
+            if (obox.x < box.x) {
+                box.x = obox.x;
+            }
+            if (obox.y < box.y) {
+                box.y = obox.y;
+            }
+            if (obox.x + w > max_x) {
+                max_x = obox.x + w;
+            }
+            if (obox.y + h > max_y) {
+                max_y = obox.y + h;
+            }
+        }
+        if (has_out) {
+            box.width = max_x - box.x;
+            box.height = max_y - box.y;
+        }
+    }
+    if (box.width <= 0 || box.height <= 0) {
+        box = (struct wlr_box){0, 0, 1920, 1080};
+    }
+    wlr_scene_node_set_position(&sw->backdrop->node, box.x, box.y);
+    wlr_scene_rect_set_size(sw->backdrop, box.width, box.height);
+    wlr_scene_node_set_enabled(&sw->backdrop->node, true);
+}
+
 /*
  * 重新量尺寸、重新定位、重画。凡是"候选集或所在输出可能变了"的时机都调它：
  * 打开时、切换途中掉了一个窗口（行数变了）。output 是局部变量，函数返回即
@@ -717,99 +810,101 @@ static struct woodland_output *switcher_pick_output(struct woodland_window_switc
 static void switcher_relayout(struct woodland_window_switcher *sw)
 {
     struct woodland_output *output = switcher_pick_output(sw);
+    switcher_update_backdrop(sw);
     switcher_measure(sw);
     switcher_place(sw, output);
     switcher_refresh(sw);
 }
 
-/* ==================== 临时半透明高亮 ==================== */
+/* ==================== 遮罩与当前预览窗口抬升 ==================== */
 
-static void switcher_tree_set_opacity(struct wlr_scene_node *node, float opacity)
+static void handle_preview_destroy(struct wl_listener *listener, void *data)
 {
-    if (!node) {
+    struct woodland_window_switcher *sw = wl_container_of(listener, sw, preview_destroy);
+    (void)data;
+    if (sw->preview_destroy.link.prev) {
+        wl_list_remove(&sw->preview_destroy.link);
+        wl_list_init(&sw->preview_destroy.link);
+    }
+    if (sw->preview_dummy) {
+        wlr_scene_node_destroy(sw->preview_dummy);
+        sw->preview_dummy = NULL;
+    }
+    sw->preview_view = NULL;
+    sw->preview_was_enabled = false;
+}
+
+static void switcher_restore_preview(struct woodland_window_switcher *sw)
+{
+    if (!sw) {
         return;
     }
-    switch (node->type) {
-    case WLR_SCENE_NODE_TREE: {
-        struct wlr_scene_tree *tree = wlr_scene_tree_from_node(node);
-        struct wlr_scene_node *child;
-        wl_list_for_each(child, &tree->children, link)
-        {
-            switcher_tree_set_opacity(child, opacity);
-        }
-        break;
+    if (sw->preview_destroy.link.prev) {
+        wl_list_remove(&sw->preview_destroy.link);
+        wl_list_init(&sw->preview_destroy.link);
     }
-    case WLR_SCENE_NODE_BUFFER: {
-        /* 当前窗口内容 buffer 基准透明度恒为 1.0；若日后引入逐窗口透明度/淡入动画，
-         * 需改为在切换器快照中保存并恢复各 buffer 的原始 opacity。 */
-        struct wlr_scene_buffer *buf = wlr_scene_buffer_from_node(node);
-        wlr_scene_buffer_set_opacity(buf, opacity);
-        break;
-    }
-    case WLR_SCENE_NODE_RECT: {
-        struct wlr_scene_rect *rect = wlr_scene_rect_from_node(node);
-        if (opacity < 1.0f) {
-            float c[4] = {
-                rect->color[0] * opacity,
-                rect->color[1] * opacity,
-                rect->color[2] * opacity,
-                rect->color[3] * opacity,
-            };
-            wlr_scene_rect_set_color(rect, c);
-        } else {
-            /* 非 SSD 的 rect 按比例还原；SSD 相关 rect 随后由 woodland_ssd_update() 精确重涂 */
-            float c[4];
-            for (int i = 0; i < 4; i++) {
-                float v = rect->color[i] / SWITCHER_DIM_OPACITY;
-                c[i] = v > 1.0f ? 1.0f : (v < 0.0f ? 0.0f : v);
-            }
-            wlr_scene_rect_set_color(rect, c);
+    struct woodland_view *view = sw->preview_view;
+    struct wlr_scene_node *dummy = sw->preview_dummy;
+    bool was_enabled = sw->preview_was_enabled;
+    sw->preview_view = NULL;
+    sw->preview_dummy = NULL;
+    sw->preview_was_enabled = false;
+
+    if (view && view->scene_tree) {
+        struct wlr_scene_tree *target_parent =
+            (view->workspace && view->workspace->tree) ? view->workspace->tree
+                                                       : (dummy ? dummy->parent : NULL);
+        if (target_parent && view->scene_tree->node.parent != target_parent) {
+            wlr_scene_node_reparent(&view->scene_tree->node, target_parent);
         }
-        break;
-    }
-#if WOODLAND_HAVE_EFFECTS
-    case WLR_SCENE_NODE_SHADOW:
-    case WLR_SCENE_NODE_BLUR:
-        if (opacity < 1.0f) {
-            wlr_scene_node_set_enabled(node, false);
+        if (dummy && dummy->parent == view->scene_tree->node.parent) {
+            wlr_scene_node_place_above(&view->scene_tree->node, dummy);
         }
-        break;
-#endif
-    default:
-        break;
+        wlr_scene_node_set_enabled(&view->scene_tree->node, was_enabled);
+    }
+    if (dummy) {
+        wlr_scene_node_destroy(dummy);
     }
 }
 
-static void switcher_set_view_dimmed(struct woodland_view *view, bool dimmed)
+static void switcher_apply_preview(struct woodland_window_switcher *sw, struct woodland_view *view)
 {
-    if (!view || !view->scene_tree) {
+    if (!sw || !sw->preview_tree || !view || !view->scene_tree || !view->scene_tree->node.parent) {
         return;
     }
-    if (dimmed) {
-        /* 先完整刷新 SSD 基准色（含 button_bg 等），避免重复叠加缩放 */
-        if (view->ssd) {
-            woodland_ssd_update(view);
-        }
-        switcher_tree_set_opacity(&view->scene_tree->node, SWITCHER_DIM_OPACITY);
+    if (sw->preview_view == view) {
+        wlr_scene_node_set_enabled(&view->scene_tree->node, true);
+        return;
+    }
+    switcher_restore_preview(sw);
+
+    struct wlr_scene_tree *orig_parent = view->scene_tree->node.parent;
+    struct wlr_scene_rect *dummy =
+        wlr_scene_rect_create(orig_parent, 0, 0, (const float[4]){0.0f, 0.0f, 0.0f, 0.0f});
+    if (!dummy) {
+        return;
+    }
+    wlr_scene_node_place_below(&dummy->node, &view->scene_tree->node);
+    wlr_scene_node_set_enabled(&dummy->node, false);
+
+    sw->preview_view = view;
+    sw->preview_dummy = &dummy->node;
+    sw->preview_was_enabled = view->scene_tree->node.enabled;
+    sw->preview_destroy.notify = handle_preview_destroy;
+    wl_signal_add(&view->scene_tree->node.events.destroy, &sw->preview_destroy);
+
+    wlr_scene_node_reparent(&view->scene_tree->node, sw->preview_tree);
+    wlr_scene_node_raise_to_top(&view->scene_tree->node);
+    /* 最小化窗口也临时置可见以展示预览（不改 view->minimized 语义） */
+    wlr_scene_node_set_enabled(&view->scene_tree->node, true);
+}
+
+static void switcher_update_preview(struct woodland_window_switcher *sw)
+{
+    if (sw && sw->active && sw->selected >= 0 && sw->selected < sw->count) {
+        switcher_apply_preview(sw, sw->views[sw->selected]);
     } else {
-        switcher_tree_set_opacity(&view->scene_tree->node, 1.0f);
-        if (view->ssd) {
-            /* woodland_ssd_update() 会完整重涂标题栏/边框/按钮底色并同步刷新特效 */
-            woodland_ssd_update(view);
-        } else {
-            woodland_effect_update(view);
-        }
-    }
-}
-
-static void switcher_update_dimming(struct woodland_window_switcher *sw)
-{
-    for (int i = 0; i < sw->count; i++) {
-        bool want_dim = sw->active && (i != sw->selected);
-        if (want_dim != sw->dimmed[i]) {
-            switcher_set_view_dimmed(sw->views[i], want_dim);
-            sw->dimmed[i] = want_dim;
-        }
+        switcher_restore_preview(sw);
     }
 }
 
@@ -826,7 +921,11 @@ static void switcher_finish(struct woodland_server *server, bool apply)
         target = sw->views[sw->selected];
     }
     sw->active = false;
-    switcher_update_dimming(sw);
+    switcher_restore_preview(sw);
+    if (sw->backdrop) {
+        wlr_scene_node_set_enabled(&sw->backdrop->node, false);
+        wlr_scene_rect_set_size(sw->backdrop, 0, 0);
+    }
     if (sw->tree) {
         wlr_scene_node_set_enabled(&sw->tree->node, false);
     }
@@ -911,7 +1010,6 @@ static void switcher_drop(struct woodland_window_switcher *sw, int idx)
     for (int i = idx; i + 1 < sw->count; i++) {
         sw->views[i] = sw->views[i + 1];
         sw->minimized[i] = sw->minimized[i + 1];
-        sw->dimmed[i] = sw->dimmed[i + 1];
     }
     sw->count--;
     if (sw->count == 0) {
@@ -927,7 +1025,7 @@ static void switcher_drop(struct woodland_window_switcher *sw, int idx)
     if (sw->selected < 0) {
         sw->selected = 0;
     }
-    switcher_update_dimming(sw);
+    switcher_update_preview(sw);
     switcher_relayout(sw);
 }
 
@@ -941,6 +1039,9 @@ static void handle_view_unmapped(struct wl_listener *listener, void *data)
     int idx = switcher_index_of(sw, view);
     if (idx < 0) {
         return;
+    }
+    if (view == sw->preview_view) {
+        switcher_restore_preview(sw);
     }
     switcher_drop(sw, idx);
     woodland_trace_add("switcher", view->id, "drop n=%d sel=%d", sw->count, sw->selected);
@@ -975,9 +1076,8 @@ static void handle_view_changed(struct wl_listener *listener, void *data)
         return;
     }
     if (!woodland_view_restorable(view)) {
-        if (sw->dimmed[idx]) {
-            switcher_set_view_dimmed(view, false);
-            sw->dimmed[idx] = false;
+        if (view == sw->preview_view) {
+            switcher_restore_preview(sw);
         }
         switcher_drop(sw, idx);
         woodland_trace_add("switcher", view->id, "drop n=%d sel=%d", sw->count, sw->selected);
@@ -987,6 +1087,11 @@ static void handle_view_changed(struct wl_listener *listener, void *data)
         return;
     }
     sw->minimized[idx] = view->minimized;
+    if (view == sw->preview_view && view->scene_tree) {
+        /* 高亮项中途被最小化/恢复：同步原始可见状态并维持预览显示 */
+        sw->preview_was_enabled = !view->minimized;
+        wlr_scene_node_set_enabled(&view->scene_tree->node, true);
+    }
     /* 行数不变，但文本变了（后缀），高度不变宽度可能变 → 走 relayout */
     switcher_relayout(sw);
     if (view->minimized) {
@@ -1007,12 +1112,21 @@ bool woodland_window_switcher_init(struct woodland_server *server)
     }
     sw->server = server;
     sw->selected = -1;
+    wl_list_init(&sw->preview_destroy.link);
     if (server->scene) {
         sw->tree = wlr_scene_tree_create(&server->scene->tree);
         if (!sw->tree) {
             free(sw);
             return false;
         }
+        sw->backdrop = wlr_scene_rect_create(sw->tree, 0, 0, SWITCHER_BACKDROP_COLOR);
+        sw->preview_tree = wlr_scene_tree_create(sw->tree);
+        if (!sw->backdrop || !sw->preview_tree) {
+            wlr_scene_node_destroy(&sw->tree->node);
+            free(sw);
+            return false;
+        }
+        wlr_scene_node_set_enabled(&sw->backdrop->node, false);
         wlr_scene_node_set_enabled(&sw->tree->node, false);
     }
     woodland_listener_connect(&sw->view_unmapped, &server->view_unmapped, handle_view_unmapped,
@@ -1060,6 +1174,8 @@ void woodland_window_switcher_finish(struct woodland_server *server)
     if (sw->tree) {
         wlr_scene_node_destroy(&sw->tree->node);
         sw->tree = NULL;
+        sw->backdrop = NULL;
+        sw->preview_tree = NULL;
         sw->panel = NULL;
         for (int i = 0; i < WOODLAND_SWITCHER_MAX_ROWS; i++) {
             sw->row_icons[i] = NULL;
@@ -1123,12 +1239,11 @@ bool woodland_window_switcher_begin(struct woodland_server *server, bool forward
          */
         return false;
     }
-    memset(sw->dimmed, 0, sizeof(sw->dimmed));
     sw->selected = woodland_switcher_initial_index(sw->views, sw->count, origin, forward);
     sw->scroll = 0;
     sw->active = true;
 
-    switcher_update_dimming(sw);
+    switcher_update_preview(sw);
     switcher_relayout(sw);
 
     wlr_scene_node_set_enabled(&sw->tree->node, true);
@@ -1158,7 +1273,7 @@ bool woodland_window_switcher_step(struct woodland_server *server, bool forward)
         return true;
     }
     sw->selected = next;
-    switcher_update_dimming(sw);
+    switcher_update_preview(sw);
     switcher_refresh(sw);
     return true;
 }
@@ -1251,4 +1366,20 @@ void woodland_window_switcher_status(struct woodland_server *server, struct wood
     bool has_selected = sw && sw->active && sw->selected >= 0 && sw->selected < sw->count;
     woodland_json_obj_int(&obj, "selected", has_selected ? (int64_t)sw->views[sw->selected]->id : 0);
     woodland_json_obj_close(&obj);
+}
+
+struct woodland_view *woodland_window_switcher_preview_view(
+    const struct woodland_server *server, struct wlr_scene_tree **out_tree)
+{
+    const struct woodland_window_switcher *sw = server ? server->window_switcher : NULL;
+    if (sw && sw->active && sw->preview_view) {
+        if (out_tree) {
+            *out_tree = sw->preview_tree;
+        }
+        return sw->preview_view;
+    }
+    if (out_tree) {
+        *out_tree = NULL;
+    }
+    return NULL;
 }

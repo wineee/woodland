@@ -316,6 +316,8 @@ int main(void)
     /* 回到当前工作区也不会自己回来：候选集是打开那一刻拍下来的 */
     vb.minimized = false;
     vb.workspace = &ws1;
+    wlr_scene_node_reparent(&vb.scene_tree->node, ws1.tree);
+    wlr_scene_node_place_above(&vb.scene_tree->node, &va.scene_tree->node);
     wl_signal_emit_mutable(&server.view_changed, &vb);
     expect_status(&server, "\"active\":true", "\"count\":2", "\"index\":1");
     woodland_window_switcher_cancel(&server);
@@ -388,7 +390,7 @@ int main(void)
         va.minimized = false;
     }
 
-    /* ---------- 7k. 图标节点与非选中窗口临时半透明凸显 ---------- */
+    /* ---------- 7k. 图标节点、全屏遮罩与预览窗口临时抬升（含最小化与跨工作区） ---------- */
     {
         struct wlr_scene_buffer *buf_a = wlr_scene_buffer_create(va.scene_tree, NULL);
         struct wlr_scene_buffer *buf_b = wlr_scene_buffer_create(vb.scene_tree, NULL);
@@ -399,39 +401,90 @@ int main(void)
 
         server.focused_view = &va;
         assert(woodland_window_switcher_begin(&server, true));
-        /* selected = vb (index 1): vb 不透明，va/vc 高透明度 */
-        assert(fabsf(buf_b->opacity - 1.0f) < 0.01f);
-        assert(buf_a->opacity > 0.0f && buf_a->opacity < 0.25f);
-        assert(buf_c->opacity > 0.0f && buf_c->opacity < 0.25f);
-        assert(rect_a->color[3] > 0.0f && rect_a->color[3] < 0.25f);
 
-        /* 切换一步到 vc: vc 恢复 1.0，vb 变半透明 */
-        assert(woodland_window_switcher_step(&server, true));
-        assert(fabsf(buf_c->opacity - 1.0f) < 0.01f);
-        assert(buf_b->opacity > 0.0f && buf_b->opacity < 0.25f);
-        assert(buf_a->opacity > 0.0f && buf_a->opacity < 0.25f);
-
-        /* 面板节点中应包含 1 块面板 buffer + 3 个启用中的图标 buffer */
-        struct wlr_scene_node *sw_node =
-            wl_container_of(server.scene->tree.children.prev, sw_node, link);
-        assert(sw_node->type == WLR_SCENE_NODE_TREE);
-        struct wlr_scene_tree *sw_tree = wlr_scene_tree_from_node(sw_node);
-        int enabled_bufs = 0;
-        struct wlr_scene_node *child;
-        wl_list_for_each(child, &sw_tree->children, link)
-        {
-            if (child->type == WLR_SCENE_NODE_BUFFER && child->enabled) {
-                enabled_bufs++;
-            }
-        }
-        assert(enabled_bufs == 4);
-
-        /* 取消后全部恢复 1.0 */
-        woodland_window_switcher_cancel(&server);
+        /* 1. 不修改其他窗口的 buffer opacity / rect color */
         assert(fabsf(buf_a->opacity - 1.0f) < 0.01f);
         assert(fabsf(buf_b->opacity - 1.0f) < 0.01f);
         assert(fabsf(buf_c->opacity - 1.0f) < 0.01f);
         assert(fabsf(rect_a->color[3] - 1.0f) < 0.01f);
+
+        /* 2. 面板树包含启用的遮罩、预览树（在遮罩之上、面板之下）及 1+3=4 个启用 buffer */
+        struct wlr_scene_tree *preview_tree = NULL;
+        assert(woodland_window_switcher_preview_view(&server, &preview_tree) == &vb);
+        assert(preview_tree != NULL);
+        assert(vb.scene_tree->node.parent == preview_tree);
+        assert(va.scene_tree->node.parent == ws1.tree);
+        assert(vc.scene_tree->node.parent == ws1.tree);
+
+        struct wlr_scene_node *sw_node =
+            wl_container_of(server.scene->tree.children.prev, sw_node, link);
+        assert(sw_node->type == WLR_SCENE_NODE_TREE);
+        struct wlr_scene_tree *sw_tree = wlr_scene_tree_from_node(sw_node);
+
+        struct wlr_scene_node *backdrop_node =
+            wl_container_of(sw_tree->children.next, backdrop_node, link);
+        assert(backdrop_node->type == WLR_SCENE_NODE_RECT && backdrop_node->enabled);
+        struct wlr_scene_rect *backdrop_rect = wlr_scene_rect_from_node(backdrop_node);
+        assert(backdrop_rect->width >= 800 && backdrop_rect->height >= 600);
+        assert(&preview_tree->node ==
+               wl_container_of(backdrop_node->link.next, (struct wlr_scene_node *)NULL, link));
+
+        int enabled_bufs = 0;
+        bool saw_preview_before_panel = false;
+        bool seen_preview = false;
+        struct wlr_scene_node *child;
+        wl_list_for_each(child, &sw_tree->children, link)
+        {
+            if (child == &preview_tree->node) {
+                seen_preview = true;
+            } else if (child->type == WLR_SCENE_NODE_BUFFER && child->enabled) {
+                if (seen_preview) {
+                    saw_preview_before_panel = true;
+                }
+                enabled_bufs++;
+            }
+        }
+        assert(enabled_bufs == 4);
+        assert(saw_preview_before_panel);
+
+        /* 3. 切到 vc 后 vb 准确回到 ws1.tree 且位于 va 之上，vc 进入 preview_tree */
+        assert(woodland_window_switcher_step(&server, true));
+        assert(woodland_window_switcher_preview_view(&server, NULL) == &vc);
+        assert(vb.scene_tree->node.parent == ws1.tree);
+        assert(vb.scene_tree->node.link.prev == &va.scene_tree->node.link);
+        assert(vc.scene_tree->node.parent == preview_tree);
+
+        /* 取消后 vc 回到 ws1.tree 顶部且无预览视图残留 */
+        woodland_window_switcher_cancel(&server);
+        assert(woodland_window_switcher_preview_view(&server, NULL) == NULL);
+        assert(vc.scene_tree->node.parent == ws1.tree);
+        assert(vc.scene_tree->node.link.prev == &vb.scene_tree->node.link);
+
+        /* 4. 最小化窗口预览时临时置可见，取消后恢复隐藏且保留最小化标志 */
+        vc.minimized = true;
+        wlr_scene_node_set_enabled(&vc.scene_tree->node, false);
+        assert(woodland_window_switcher_begin(&server, false));
+        assert(woodland_window_switcher_preview_view(&server, NULL) == &vc);
+        assert(vc.scene_tree->node.parent == preview_tree);
+        assert(vc.scene_tree->node.enabled);
+        assert(vc.minimized);
+        woodland_window_switcher_cancel(&server);
+        assert(vc.scene_tree->node.parent == ws1.tree);
+        assert(!vc.scene_tree->node.enabled);
+        assert(vc.minimized);
+        vc.minimized = false;
+        wlr_scene_node_set_enabled(&vc.scene_tree->node, true);
+
+        /* 5. 预览期间窗口被移到 ws2 并发 view_changed：应归还到 ws2.tree 并切换预览对象 */
+        assert(woodland_window_switcher_begin(&server, false));
+        assert(woodland_window_switcher_preview_view(&server, NULL) == &vc);
+        vc.workspace = &ws2;
+        wl_signal_emit_mutable(&server.view_changed, &vc);
+        assert(vc.scene_tree->node.parent == ws2.tree);
+        assert(woodland_window_switcher_preview_view(&server, NULL) == &vb);
+        woodland_window_switcher_cancel(&server);
+        vc.workspace = &ws1;
+        wlr_scene_node_reparent(&vc.scene_tree->node, ws1.tree);
 
         wlr_scene_node_destroy(&rect_a->node);
         wlr_scene_node_destroy(&buf_a->node);
