@@ -1111,17 +1111,43 @@ static void mv_raise_tree(struct woodland_multitask_view *mv)
     }
 }
 
+static void mv_cover_size(const struct woodland_multitask_view *mv, int *out_w, int *out_h)
+{
+    int w = mv->output_box.width;
+    int h = mv->output_box.height;
+    /*
+     * 分数缩放（如 1.25）下，output_box.width/height 是按 round 取整的逻辑尺寸，
+     * 换算回物理像素可能少 1px（右/底边漏缝）；全屏背景与模糊按物理尺寸 ceil 补齐。
+     */
+    if (mv->output && mv->output->wlr_output && mv->scale > 0.0f) {
+        int phys_w = 0, phys_h = 0;
+        wlr_output_transformed_resolution(mv->output->wlr_output, &phys_w, &phys_h);
+        int ceil_w = (int)ceil((double)phys_w / mv->scale);
+        int ceil_h = (int)ceil((double)phys_h / mv->scale);
+        if (ceil_w > w) {
+            w = ceil_w;
+        }
+        if (ceil_h > h) {
+            h = ceil_h;
+        }
+    }
+    *out_w = w;
+    *out_h = h;
+}
+
 static void mv_rebuild_all(struct woodland_multitask_view *mv,
                            struct woodland_view *prefer_selected)
 {
     mv_resolve_output(mv);
     if (mv_ensure_scene_trees(mv)) {
+        int cover_w = 0, cover_h = 0;
+        mv_cover_size(mv, &cover_w, &cover_h);
         wlr_scene_node_set_position(&mv->tree->node, mv->output_box.x, mv->output_box.y);
-        wlr_scene_rect_set_size(mv->backdrop, mv->output_box.width, mv->output_box.height);
-        struct wlr_box blur_reg = {0, 0, mv->output_box.width, mv->output_box.height};
+        wlr_scene_rect_set_size(mv->backdrop, cover_w, cover_h);
+        struct wlr_box blur_reg = {0, 0, cover_w, cover_h};
         if (woodland_effect_server_blur_enabled(mv->server)) {
-            woodland_effect_blur_apply(mv->tree, 0, 0, mv->output_box.width, mv->output_box.height,
-                                       &blur_reg, NULL);
+            /* 使用 only_bottom=true 复用 optimized_blur，避免 hover 局部重绘时模糊闪烁 */
+            woodland_effect_blur_apply(mv->tree, 0, 0, cover_w, cover_h, &blur_reg, NULL, true);
         } else {
             woodland_effect_blur_clear(mv->tree);
         }

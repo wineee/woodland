@@ -87,7 +87,8 @@ void woodland_effect_buffer_corners(const struct woodland_effect_corners *window
  */
 bool woodland_effect_blur_apply(struct wlr_scene_tree *tree, int x, int y, int width,
                                 int height, const struct wlr_box *region,
-                                const struct woodland_effect_corners *corners);
+                                const struct woodland_effect_corners *corners,
+                                bool only_bottom);
 
 /** 关掉 tree 上那块模糊（节点留着，下次不用重建）。 */
 void woodland_effect_blur_clear(struct wlr_scene_tree *tree);

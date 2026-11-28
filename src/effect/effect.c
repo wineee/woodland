@@ -615,9 +615,10 @@ void woodland_effect_blur_clear(struct wlr_scene_tree *tree)
 
 bool woodland_effect_blur_apply(struct wlr_scene_tree *tree, int x, int y, int width,
                                 int height, const struct wlr_box *region,
-                                const struct woodland_effect_corners *corners)
+                                const struct woodland_effect_corners *corners,
+                                bool only_bottom)
 {
-    return blur_apply_internal(tree, NULL, x, y, width, height, region, corners, false);
+    return blur_apply_internal(tree, NULL, x, y, width, height, region, corners, only_bottom);
 }
 
 struct woodland_popup_effect {
@@ -1026,7 +1027,8 @@ void woodland_effect_blur_clear(struct wlr_scene_tree *tree)
 
 bool woodland_effect_blur_apply(struct wlr_scene_tree *tree, int x, int y, int width,
                                 int height, const struct wlr_box *region,
-                                const struct woodland_effect_corners *corners)
+                                const struct woodland_effect_corners *corners,
+                                bool only_bottom)
 {
     (void)tree;
     (void)x;
@@ -1035,6 +1037,7 @@ bool woodland_effect_blur_apply(struct wlr_scene_tree *tree, int x, int y, int w
     (void)height;
     (void)region;
     (void)corners;
+    (void)only_bottom;
     return false;
 }
 
