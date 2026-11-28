@@ -431,6 +431,7 @@ int main(void)
         assert(fabsf(buf_a->opacity - 1.0f) < 0.01f);
         assert(fabsf(buf_b->opacity - 1.0f) < 0.01f);
         assert(fabsf(buf_c->opacity - 1.0f) < 0.01f);
+        assert(fabsf(rect_a->color[3] - 1.0f) < 0.01f);
 
         wlr_scene_node_destroy(&rect_a->node);
         wlr_scene_node_destroy(&buf_a->node);

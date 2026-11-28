@@ -11,6 +11,7 @@
 #include "focus.h"
 #include "trace.h"
 #include "layer.h"
+#include "view.h"
 #include "workspace.h"
 #include "woodland.h"
 
@@ -174,6 +175,17 @@ void woodland_workspace_switch_focus(struct woodland_server *server,
 void woodland_workspace_switch(struct woodland_server *server,
                                struct woodland_workspace *target) {
     woodland_workspace_switch_focus(server, target, true);
+}
+
+void woodland_workspace_move_view(struct woodland_view *view,
+                                  struct woodland_workspace *target) {
+    if (!view || !target || view->workspace == target) {
+        return;
+    }
+    view->workspace = target;
+    if (view->scene_tree && target->tree) {
+        wlr_scene_node_reparent(&view->scene_tree->node, target->tree);
+    }
 }
 
 void woodland_workspace_finish(struct woodland_server *server) {

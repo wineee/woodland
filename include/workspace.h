@@ -7,6 +7,7 @@
 #include "scene.h"
 
 struct woodland_server;
+struct woodland_view;
 struct wlr_ext_workspace_handle_v1;
 
 struct woodland_workspace {
@@ -34,5 +35,11 @@ void woodland_workspace_switch(struct woodland_server *server,
 void woodland_workspace_switch_focus(struct woodland_server *server,
                                      struct woodland_workspace *target,
                                      bool restore_focus);
+
+/**
+ * 将视图迁移到目标工作区（更新 view->workspace 并 reparent 场景树，不切换当前工作区）。
+ */
+void woodland_workspace_move_view(struct woodland_view *view,
+                                  struct woodland_workspace *target);
 
 #endif

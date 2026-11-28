@@ -1425,10 +1425,7 @@ static void mv_move_view_to_workspace(struct woodland_multitask_view *mv,
     struct woodland_server *server = mv->server;
     mv_cancel_drag(mv);
 
-    view->workspace = target_ws;
-    if (view->scene_tree && target_ws->tree) {
-        wlr_scene_node_reparent(&view->scene_tree->node, target_ws->tree);
-    }
+    woodland_workspace_move_view(view, target_ws);
     if (woodland_focus_current(server) == view) {
         woodland_focus_fallback(server);
     }

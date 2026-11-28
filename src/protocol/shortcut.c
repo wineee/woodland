@@ -619,8 +619,7 @@ static void shortcut_move_view_to_workspace(struct woodland_server *server,
         return;
     }
     /* 先把 scene tree 挪到目标工作区的树下面，再切工作区（会 disable 旧树） */
-    view->workspace = target;
-    wlr_scene_node_reparent(&view->scene_tree->node, target->tree);
+    woodland_workspace_move_view(view, target);
     woodland_workspace_switch_focus(server, target, false);
     woodland_focus_view(view, true);
 }

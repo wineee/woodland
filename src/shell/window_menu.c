@@ -760,8 +760,7 @@ static void window_menu_execute_action(struct woodland_server *server,
         if (target && view->workspace != target) {
             woodland_trace_add("menu", view->id, "action=workspace target=%s",
                                target->name ? target->name : "");
-            view->workspace = target;
-            wlr_scene_node_reparent(&view->scene_tree->node, target->tree);
+            woodland_workspace_move_view(view, target);
             woodland_workspace_switch_focus(server, target, false);
             woodland_focus_view(view, true);
         }

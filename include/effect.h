@@ -82,13 +82,14 @@ void woodland_effect_buffer_corners(const struct woodland_effect_corners *window
  * 给任意 scene tree 挂/更新一块模糊（view 与 layer surface 共用，见 effect.c）。
  *
  * x/y/width/height 是 blur 节点在 tree 里的位置与尺寸，region 是 surface 局部
- * 坐标的裁剪区（NULL = 关掉模糊），corners 为 NULL 表示直角。返回是否真的
- * 画了（配置关掉模糊时恒为 false）。
+ * 坐标的裁剪区（NULL = 关掉模糊），corners 为 NULL 表示直角；only_bottom_layer
+ * 为 true 时对应 scenefx 的「只糊底层」(optimized_blur)，避免上层局部重绘时
+ * 触发逐帧模糊重算。返回是否真的画了（配置关掉模糊时恒为 false）。
  */
 bool woodland_effect_blur_apply(struct wlr_scene_tree *tree, int x, int y, int width,
                                 int height, const struct wlr_box *region,
                                 const struct woodland_effect_corners *corners,
-                                bool only_bottom);
+                                bool only_bottom_layer);
 
 /** 关掉 tree 上那块模糊（节点留着，下次不用重建）。 */
 void woodland_effect_blur_clear(struct wlr_scene_tree *tree);

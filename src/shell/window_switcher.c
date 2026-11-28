@@ -740,19 +740,29 @@ static void switcher_tree_set_opacity(struct wlr_scene_node *node, float opacity
         break;
     }
     case WLR_SCENE_NODE_BUFFER: {
+        /* 当前窗口内容 buffer 基准透明度恒为 1.0；若日后引入逐窗口透明度/淡入动画，
+         * 需改为在切换器快照中保存并恢复各 buffer 的原始 opacity。 */
         struct wlr_scene_buffer *buf = wlr_scene_buffer_from_node(node);
         wlr_scene_buffer_set_opacity(buf, opacity);
         break;
     }
     case WLR_SCENE_NODE_RECT: {
+        struct wlr_scene_rect *rect = wlr_scene_rect_from_node(node);
         if (opacity < 1.0f) {
-            struct wlr_scene_rect *rect = wlr_scene_rect_from_node(node);
             float c[4] = {
                 rect->color[0] * opacity,
                 rect->color[1] * opacity,
                 rect->color[2] * opacity,
                 rect->color[3] * opacity,
             };
+            wlr_scene_rect_set_color(rect, c);
+        } else {
+            /* 非 SSD 的 rect 按比例还原；SSD 相关 rect 随后由 woodland_ssd_update() 精确重涂 */
+            float c[4];
+            for (int i = 0; i < 4; i++) {
+                float v = rect->color[i] / SWITCHER_DIM_OPACITY;
+                c[i] = v > 1.0f ? 1.0f : (v < 0.0f ? 0.0f : v);
+            }
             wlr_scene_rect_set_color(rect, c);
         }
         break;
@@ -776,17 +786,19 @@ static void switcher_set_view_dimmed(struct woodland_view *view, bool dimmed)
         return;
     }
     if (dimmed) {
-        /* 先重置 SSD 基准色，避免重复叠加缩放 */
+        /* 先完整刷新 SSD 基准色（含 button_bg 等），避免重复叠加缩放 */
         if (view->ssd) {
-            woodland_ssd_set_active(view, view->activated);
+            woodland_ssd_update(view);
         }
         switcher_tree_set_opacity(&view->scene_tree->node, SWITCHER_DIM_OPACITY);
     } else {
         switcher_tree_set_opacity(&view->scene_tree->node, 1.0f);
         if (view->ssd) {
-            woodland_ssd_set_active(view, view->activated);
+            /* woodland_ssd_update() 会完整重涂标题栏/边框/按钮底色并同步刷新特效 */
+            woodland_ssd_update(view);
+        } else {
+            woodland_effect_update(view);
         }
-        woodland_effect_update(view);
     }
 }
 
