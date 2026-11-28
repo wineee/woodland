@@ -15,9 +15,9 @@
  *      "(已最小化)"，提交时先恢复再聚焦（见 switcher_finish）。
  *   2. **切换期间焦点不动**：我们只高亮，不逐个窗口真聚焦。少一次来回切换，
  *      也避免客户端收到一串 activated/inactivated 抖动。
- *   3. **渲染只依赖快照与配置**：面板是一块 cairo 画好的 buffer，尺寸按行数
- *      与最长标题算，滚动窗口跟着高亮走。不做缩略图、不做图标——这个模块
- *      的目标是"能看清楚在切谁"，不是复刻 treeland 的 switch-window。
+ *   3. **渲染只依赖快照与配置**：面板是一块 cairo 画好的 buffer（左侧配应用图标），
+ *      尺寸按行数与最长标题算，滚动窗口跟着高亮走。切换期间将非选中窗口临时
+ *      设为高透明度，使当前选中窗口清晰凸显。
  *
  * 键位与 focus_cycle 的分工见 window_switcher.h。
  */
@@ -40,12 +40,15 @@
 #include <wlr/util/box.h>
 #include <wlr/util/log.h>
 
+#include "effect.h"
 #include "focus.h"
+#include "icon.h"
 #include "multitask_view.h"
 #include "output.h"
 #include "placement.h"
 #include "scene.h"
 #include "session_lock.h"
+#include "ssd.h"
 #include "trace.h"
 #include "util/json.h"
 #include "util/listener.h"
@@ -62,8 +65,12 @@
 #define SWITCHER_ROW_HEIGHT 30
 #define SWITCHER_PADDING 6
 #define SWITCHER_TEXT_INSET 10
+#define SWITCHER_ICON_SIZE 18
+#define SWITCHER_ICON_GAP 8
 #define SWITCHER_MIN_WIDTH 260
 #define SWITCHER_MAX_WIDTH 560
+/* 非选中窗口临时半透明的不透明度（高透明度，凸显当前选中窗口） */
+#define SWITCHER_DIM_OPACITY 0.15f
 /* 一行的文本缓冲：标题 + 后缀，再长也没意义（面板最宽 560px 就 ellipsize 了） */
 #define SWITCHER_ROW_TEXT_MAX 256
 
@@ -146,6 +153,7 @@ struct woodland_window_switcher {
     /* 面板树：scene 根的子节点，打开时抬到最上面（盖住 layer 的 overlay 层） */
     struct wlr_scene_tree *tree;
     struct wlr_scene_buffer *panel;
+    struct wlr_scene_buffer *row_icons[WOODLAND_SWITCHER_MAX_ROWS];
 #if WOODLAND_HAVE_EFFECTS
     struct wlr_scene_shadow *shadow;
 #endif
@@ -171,6 +179,7 @@ struct woodland_window_switcher {
      * 现算就分不出"真的变了"和"又发了一次"，每次都得整块重排重画。
      */
     bool minimized[WOODLAND_SWITCHER_MAX_ITEMS];
+    bool dimmed[WOODLAND_SWITCHER_MAX_ITEMS];
     int count;
     int selected; /* 高亮下标；-1 = 没有高亮 */
     int scroll;   /* 面板里第一行对应快照的哪一项（候选多于可见行时） */
@@ -411,7 +420,8 @@ static void switcher_measure(struct woodland_window_switcher *sw)
     cairo_destroy(cr);
     cairo_surface_destroy(surf);
 
-    int w = SWITCHER_PADDING * 2 + SWITCHER_TEXT_INSET * 2 + max_text_w;
+    int w = SWITCHER_PADDING * 2 + SWITCHER_TEXT_INSET * 2 + SWITCHER_ICON_SIZE +
+            SWITCHER_ICON_GAP + max_text_w;
     if (w < SWITCHER_MIN_WIDTH) {
         w = SWITCHER_MIN_WIDTH;
     }
@@ -569,8 +579,13 @@ static void switcher_render(struct woodland_window_switcher *sw)
     }
     pango_layout_set_single_paragraph_mode(layout, TRUE);
     pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_END);
-    pango_layout_set_width(
-        layout, (sw->width - 2 * SWITCHER_PADDING - 2 * SWITCHER_TEXT_INSET) * PANGO_SCALE);
+    int text_x = SWITCHER_PADDING + SWITCHER_TEXT_INSET + SWITCHER_ICON_SIZE + SWITCHER_ICON_GAP;
+    int text_w = sw->width - 2 * SWITCHER_PADDING - 2 * SWITCHER_TEXT_INSET - SWITCHER_ICON_SIZE -
+                 SWITCHER_ICON_GAP;
+    if (text_w < 1) {
+        text_w = 1;
+    }
+    pango_layout_set_width(layout, text_w * PANGO_SCALE);
 
     int rows = switcher_visible_rows(sw);
     for (int i = 0; i < rows; i++) {
@@ -599,8 +614,7 @@ static void switcher_render(struct woodland_window_switcher *sw)
          */
         int text_h = 0;
         pango_layout_get_pixel_size(layout, NULL, &text_h);
-        cairo_move_to(cr, SWITCHER_PADDING + SWITCHER_TEXT_INSET,
-                      y + (SWITCHER_ROW_HEIGHT - text_h) / 2.0);
+        cairo_move_to(cr, text_x, y + (SWITCHER_ROW_HEIGHT - text_h) / 2.0);
         pango_cairo_show_layout(cr, layout);
     }
 
@@ -623,6 +637,50 @@ static void switcher_render(struct woodland_window_switcher *sw)
         wlr_scene_buffer_set_dest_size(sw->panel, sw->width, sw->height);
         wlr_scene_node_set_position(&sw->panel->node, sw->x, sw->y);
         wlr_scene_node_set_enabled(&sw->panel->node, true);
+    }
+    for (int i = 0; i < rows; i++) {
+        int idx = sw->scroll + i;
+        if (idx < 0 || idx >= sw->count) {
+            if (sw->row_icons[i]) {
+                wlr_scene_node_set_enabled(&sw->row_icons[i]->node, false);
+                wlr_scene_buffer_set_buffer(sw->row_icons[i], NULL);
+            }
+            continue;
+        }
+        struct wlr_buffer *icon_buf =
+            woodland_ssd_get_icon_buffer(sw->views[idx], SWITCHER_ICON_SIZE, scale);
+        if (!icon_buf) {
+            if (sw->row_icons[i]) {
+                wlr_scene_node_set_enabled(&sw->row_icons[i]->node, false);
+                wlr_scene_buffer_set_buffer(sw->row_icons[i], NULL);
+            }
+            continue;
+        }
+        if (!sw->row_icons[i]) {
+            sw->row_icons[i] = wlr_scene_buffer_create(sw->tree, icon_buf);
+        } else {
+            wlr_scene_buffer_set_buffer(sw->row_icons[i], icon_buf);
+        }
+        if (sw->row_icons[i]) {
+            int row_y = SWITCHER_PADDING + i * SWITCHER_ROW_HEIGHT;
+            int icon_x = sw->x + SWITCHER_PADDING + SWITCHER_TEXT_INSET;
+            int icon_y = sw->y + row_y + (SWITCHER_ROW_HEIGHT - SWITCHER_ICON_SIZE) / 2;
+            wlr_scene_buffer_set_dest_size(sw->row_icons[i], SWITCHER_ICON_SIZE,
+                                           SWITCHER_ICON_SIZE);
+            wlr_scene_node_set_position(&sw->row_icons[i]->node, icon_x, icon_y);
+            wlr_scene_buffer_set_opacity(sw->row_icons[i],
+                                         (idx != sw->selected && sw->minimized[idx]) ? 0.55f : 1.0f);
+            wlr_scene_node_set_enabled(&sw->row_icons[i]->node, true);
+            if (sw->panel) {
+                wlr_scene_node_place_above(&sw->row_icons[i]->node, &sw->panel->node);
+            }
+        }
+    }
+    for (int i = rows; i < WOODLAND_SWITCHER_MAX_ROWS; i++) {
+        if (sw->row_icons[i]) {
+            wlr_scene_node_set_enabled(&sw->row_icons[i]->node, false);
+            wlr_scene_buffer_set_buffer(sw->row_icons[i], NULL);
+        }
     }
     switcher_update_shadow(sw, corner_r);
 }
@@ -664,6 +722,85 @@ static void switcher_relayout(struct woodland_window_switcher *sw)
     switcher_refresh(sw);
 }
 
+/* ==================== 临时半透明高亮 ==================== */
+
+static void switcher_tree_set_opacity(struct wlr_scene_node *node, float opacity)
+{
+    if (!node) {
+        return;
+    }
+    switch (node->type) {
+    case WLR_SCENE_NODE_TREE: {
+        struct wlr_scene_tree *tree = wlr_scene_tree_from_node(node);
+        struct wlr_scene_node *child;
+        wl_list_for_each(child, &tree->children, link)
+        {
+            switcher_tree_set_opacity(child, opacity);
+        }
+        break;
+    }
+    case WLR_SCENE_NODE_BUFFER: {
+        struct wlr_scene_buffer *buf = wlr_scene_buffer_from_node(node);
+        wlr_scene_buffer_set_opacity(buf, opacity);
+        break;
+    }
+    case WLR_SCENE_NODE_RECT: {
+        if (opacity < 1.0f) {
+            struct wlr_scene_rect *rect = wlr_scene_rect_from_node(node);
+            float c[4] = {
+                rect->color[0] * opacity,
+                rect->color[1] * opacity,
+                rect->color[2] * opacity,
+                rect->color[3] * opacity,
+            };
+            wlr_scene_rect_set_color(rect, c);
+        }
+        break;
+    }
+#if WOODLAND_HAVE_EFFECTS
+    case WLR_SCENE_NODE_SHADOW:
+    case WLR_SCENE_NODE_BLUR:
+        if (opacity < 1.0f) {
+            wlr_scene_node_set_enabled(node, false);
+        }
+        break;
+#endif
+    default:
+        break;
+    }
+}
+
+static void switcher_set_view_dimmed(struct woodland_view *view, bool dimmed)
+{
+    if (!view || !view->scene_tree) {
+        return;
+    }
+    if (dimmed) {
+        /* 先重置 SSD 基准色，避免重复叠加缩放 */
+        if (view->ssd) {
+            woodland_ssd_set_active(view, view->activated);
+        }
+        switcher_tree_set_opacity(&view->scene_tree->node, SWITCHER_DIM_OPACITY);
+    } else {
+        switcher_tree_set_opacity(&view->scene_tree->node, 1.0f);
+        if (view->ssd) {
+            woodland_ssd_set_active(view, view->activated);
+        }
+        woodland_effect_update(view);
+    }
+}
+
+static void switcher_update_dimming(struct woodland_window_switcher *sw)
+{
+    for (int i = 0; i < sw->count; i++) {
+        bool want_dim = sw->active && (i != sw->selected);
+        if (want_dim != sw->dimmed[i]) {
+            switcher_set_view_dimmed(sw->views[i], want_dim);
+            sw->dimmed[i] = want_dim;
+        }
+    }
+}
+
 /* ==================== 生命周期 ==================== */
 
 static void switcher_finish(struct woodland_server *server, bool apply)
@@ -677,6 +814,7 @@ static void switcher_finish(struct woodland_server *server, bool apply)
         target = sw->views[sw->selected];
     }
     sw->active = false;
+    switcher_update_dimming(sw);
     if (sw->tree) {
         wlr_scene_node_set_enabled(&sw->tree->node, false);
     }
@@ -687,6 +825,12 @@ static void switcher_finish(struct woodland_server *server, bool apply)
      */
     if (sw->panel) {
         wlr_scene_buffer_set_buffer(sw->panel, NULL);
+    }
+    for (int i = 0; i < WOODLAND_SWITCHER_MAX_ROWS; i++) {
+        if (sw->row_icons[i]) {
+            wlr_scene_node_set_enabled(&sw->row_icons[i]->node, false);
+            wlr_scene_buffer_set_buffer(sw->row_icons[i], NULL);
+        }
     }
     sw->count = 0;
     sw->selected = -1;
@@ -755,6 +899,7 @@ static void switcher_drop(struct woodland_window_switcher *sw, int idx)
     for (int i = idx; i + 1 < sw->count; i++) {
         sw->views[i] = sw->views[i + 1];
         sw->minimized[i] = sw->minimized[i + 1];
+        sw->dimmed[i] = sw->dimmed[i + 1];
     }
     sw->count--;
     if (sw->count == 0) {
@@ -770,6 +915,7 @@ static void switcher_drop(struct woodland_window_switcher *sw, int idx)
     if (sw->selected < 0) {
         sw->selected = 0;
     }
+    switcher_update_dimming(sw);
     switcher_relayout(sw);
 }
 
@@ -817,6 +963,10 @@ static void handle_view_changed(struct wl_listener *listener, void *data)
         return;
     }
     if (!woodland_view_restorable(view)) {
+        if (sw->dimmed[idx]) {
+            switcher_set_view_dimmed(view, false);
+            sw->dimmed[idx] = false;
+        }
         switcher_drop(sw, idx);
         woodland_trace_add("switcher", view->id, "drop n=%d sel=%d", sw->count, sw->selected);
         return;
@@ -899,6 +1049,9 @@ void woodland_window_switcher_finish(struct woodland_server *server)
         wlr_scene_node_destroy(&sw->tree->node);
         sw->tree = NULL;
         sw->panel = NULL;
+        for (int i = 0; i < WOODLAND_SWITCHER_MAX_ROWS; i++) {
+            sw->row_icons[i] = NULL;
+        }
 #if WOODLAND_HAVE_EFFECTS
         sw->shadow = NULL;
 #endif
@@ -958,10 +1111,12 @@ bool woodland_window_switcher_begin(struct woodland_server *server, bool forward
          */
         return false;
     }
+    memset(sw->dimmed, 0, sizeof(sw->dimmed));
     sw->selected = woodland_switcher_initial_index(sw->views, sw->count, origin, forward);
     sw->scroll = 0;
     sw->active = true;
 
+    switcher_update_dimming(sw);
     switcher_relayout(sw);
 
     wlr_scene_node_set_enabled(&sw->tree->node, true);
@@ -991,6 +1146,7 @@ bool woodland_window_switcher_step(struct woodland_server *server, bool forward)
         return true;
     }
     sw->selected = next;
+    switcher_update_dimming(sw);
     switcher_refresh(sw);
     return true;
 }

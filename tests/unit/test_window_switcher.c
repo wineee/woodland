@@ -8,6 +8,7 @@
  * 连按 Tab 弹回同一个窗口、候选被关掉后面板里留着悬空指针。
  */
 #include <assert.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -24,6 +25,7 @@
 #include <xkbcommon/xkbcommon.h>
 
 #include "focus.h"
+#include "icon.h"
 #include "multitask_view.h"
 #include "output.h"
 #include "scene.h"
@@ -386,6 +388,56 @@ int main(void)
         va.minimized = false;
     }
 
+    /* ---------- 7k. 图标节点与非选中窗口临时半透明凸显 ---------- */
+    {
+        struct wlr_scene_buffer *buf_a = wlr_scene_buffer_create(va.scene_tree, NULL);
+        struct wlr_scene_buffer *buf_b = wlr_scene_buffer_create(vb.scene_tree, NULL);
+        struct wlr_scene_buffer *buf_c = wlr_scene_buffer_create(vc.scene_tree, NULL);
+        float rect_color[4] = {0.8f, 0.8f, 0.8f, 1.0f};
+        struct wlr_scene_rect *rect_a = wlr_scene_rect_create(va.scene_tree, 40, 20, rect_color);
+        assert(buf_a && buf_b && buf_c && rect_a);
+
+        server.focused_view = &va;
+        assert(woodland_window_switcher_begin(&server, true));
+        /* selected = vb (index 1): vb 不透明，va/vc 高透明度 */
+        assert(fabsf(buf_b->opacity - 1.0f) < 0.01f);
+        assert(buf_a->opacity > 0.0f && buf_a->opacity < 0.25f);
+        assert(buf_c->opacity > 0.0f && buf_c->opacity < 0.25f);
+        assert(rect_a->color[3] > 0.0f && rect_a->color[3] < 0.25f);
+
+        /* 切换一步到 vc: vc 恢复 1.0，vb 变半透明 */
+        assert(woodland_window_switcher_step(&server, true));
+        assert(fabsf(buf_c->opacity - 1.0f) < 0.01f);
+        assert(buf_b->opacity > 0.0f && buf_b->opacity < 0.25f);
+        assert(buf_a->opacity > 0.0f && buf_a->opacity < 0.25f);
+
+        /* 面板节点中应包含 1 块面板 buffer + 3 个启用中的图标 buffer */
+        struct wlr_scene_node *sw_node =
+            wl_container_of(server.scene->tree.children.prev, sw_node, link);
+        assert(sw_node->type == WLR_SCENE_NODE_TREE);
+        struct wlr_scene_tree *sw_tree = wlr_scene_tree_from_node(sw_node);
+        int enabled_bufs = 0;
+        struct wlr_scene_node *child;
+        wl_list_for_each(child, &sw_tree->children, link)
+        {
+            if (child->type == WLR_SCENE_NODE_BUFFER && child->enabled) {
+                enabled_bufs++;
+            }
+        }
+        assert(enabled_bufs == 4);
+
+        /* 取消后全部恢复 1.0 */
+        woodland_window_switcher_cancel(&server);
+        assert(fabsf(buf_a->opacity - 1.0f) < 0.01f);
+        assert(fabsf(buf_b->opacity - 1.0f) < 0.01f);
+        assert(fabsf(buf_c->opacity - 1.0f) < 0.01f);
+
+        wlr_scene_node_destroy(&rect_a->node);
+        wlr_scene_node_destroy(&buf_a->node);
+        wlr_scene_node_destroy(&buf_b->node);
+        wlr_scene_node_destroy(&buf_c->node);
+    }
+
     /* ---------- 8. 切换中候选被卸载：从快照里摘掉，不悬空 ---------- */
     server.focused_view = &va;
     assert(woodland_window_switcher_begin(&server, true));
@@ -421,6 +473,7 @@ int main(void)
     assert(!woodland_window_switcher_is_active(&server));
 
     woodland_window_switcher_finish(&server);
+    woodland_icon_cache_finish();
     assert(server.window_switcher == NULL);
     server.session_lock = NULL;
 
