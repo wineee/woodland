@@ -308,6 +308,13 @@ struct woodland_view *woodland_cursor_ssd_at(struct woodland_server *server,
 /** 交互式移动/缩放的指针 motion 处理。 */
 void woodland_cursor_process_motion(struct woodland_server *server, uint32_t time);
 
+/**
+ * 一次指针按键的合成器侧处理（锁屏 / 菜单 / 拖拽 / SSD / 点击聚焦 / 下发给客户端）。
+ * 物理指针与触摸的鼠标模拟共用这一条路，别在调用方复制其中任何一段。
+ */
+void woodland_cursor_handle_button(struct woodland_server *server, uint32_t time_msec,
+                                   uint32_t button, enum wl_pointer_button_state state);
+
 /** 结束交互式 move/resize。 */
 void woodland_cursor_reset_mode(struct woodland_server *server);
 

@@ -18,7 +18,9 @@
 #include "focus.h"
 #include "ime.h"
 #include "protocol.h"
+#include "input_config.h"
 #include "seat.h"
+#include "touch.h"
 #include "session_lock.h"
 #include "trace.h"
 #include "view.h"
@@ -403,9 +405,8 @@ bool woodland_seat_init_debug_keyboard(struct woodland_server *server)
         free(kb);
         return false;
     }
-    wlr_seat_set_capabilities(server->seat,
-                              WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD);
     server->debug_keyboard = kb;
+    woodland_seat_update_capabilities(server);
     return true;
 }
 
@@ -418,9 +419,7 @@ void woodland_seat_finish_debug_keyboard(struct woodland_server *server)
     server->debug_keyboard = NULL;
     wlr_keyboard_finish(kb);
     free(kb);
-    if (server->seat && wl_list_empty(&server->keyboards)) {
-        wlr_seat_set_capabilities(server->seat, WL_SEAT_CAPABILITY_POINTER);
-    }
+    woodland_seat_update_capabilities(server);
 }
 
 bool woodland_seat_debug_key(struct woodland_server *server, uint32_t keycode,
@@ -440,9 +439,25 @@ bool woodland_seat_debug_key(struct woodland_server *server, uint32_t keycode,
     return true;
 }
 
+void woodland_seat_update_capabilities(struct woodland_server *server)
+{
+    if (!server || !server->seat) {
+        return;
+    }
+    uint32_t caps = WL_SEAT_CAPABILITY_POINTER;
+    if (!wl_list_empty(&server->keyboards)) {
+        caps |= WL_SEAT_CAPABILITY_KEYBOARD;
+    }
+    if (!wl_list_empty(&server->touch_devices)) {
+        caps |= WL_SEAT_CAPABILITY_TOUCH;
+    }
+    wlr_seat_set_capabilities(server->seat, caps);
+}
+
 static void server_new_pointer(struct woodland_server *server, struct wlr_input_device *device)
 {
     wlr_cursor_attach_input_device(server->cursor, device);
+    woodland_input_configure(server, device);
     /* 手势协议按设备挂监听，交给协议层自己管生命周期 */
     woodland_protocol_attach_input(server, device);
 }
@@ -458,14 +473,13 @@ static void server_new_input(struct wl_listener *listener, void *data)
     case WLR_INPUT_DEVICE_POINTER:
         server_new_pointer(server, device);
         break;
+    case WLR_INPUT_DEVICE_TOUCH:
+        woodland_touch_new_device(server, device);
+        break;
     default:
         break;
     }
-    uint32_t caps = WL_SEAT_CAPABILITY_POINTER;
-    if (!wl_list_empty(&server->keyboards)) {
-        caps |= WL_SEAT_CAPABILITY_KEYBOARD;
-    }
-    wlr_seat_set_capabilities(server->seat, caps);
+    woodland_seat_update_capabilities(server);
 }
 
 /* ==================== seat 事件 ==================== */
@@ -520,6 +534,8 @@ static void seat_request_set_selection(struct wl_listener *listener, void *data)
 bool woodland_seat_init(struct woodland_server *server)
 {
     wl_list_init(&server->keyboards);
+    wl_list_init(&server->touch_devices);
+    wl_list_init(&server->touch_points);
 
     server->seat = wlr_seat_create(server->display, "seat0");
     if (!server->seat) {

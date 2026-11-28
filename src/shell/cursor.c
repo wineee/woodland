@@ -340,10 +340,9 @@ static void server_cursor_motion_absolute(struct wl_listener *listener, void *da
     woodland_cursor_process_motion(server, event->time_msec);
 }
 
-static void server_cursor_button(struct wl_listener *listener, void *data)
+void woodland_cursor_handle_button(struct woodland_server *server, uint32_t time_msec,
+                                   uint32_t button, enum wl_pointer_button_state state)
 {
-    struct woodland_server *server = wl_container_of(listener, server, cursor_button);
-    struct wlr_pointer_button_event *event = data;
     /* 一次性快捷键捕获：pointer button 以 interrupted 终止它，事件被消费 */
     if (server->shortcut_pointer_hook && server->shortcut_pointer_hook(server)) {
         return;
@@ -357,8 +356,8 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
                                          &sx, &sy);
         if (surface) {
             wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
-            wlr_seat_pointer_notify_button(server->seat, event->time_msec, event->button,
-                                           event->state);
+            wlr_seat_pointer_notify_button(server->seat, time_msec, button,
+                                           state);
         } else {
             wlr_seat_pointer_clear_focus(server->seat);
         }
@@ -371,20 +370,20 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
      * 就会直接发给客户端，客户端的按键状态从此错一位。让点击照常生效也符合
      * 直觉——"按住 Alt 东张西望，然后直接点一下目标窗口"。
      */
-    if (event->state == WL_POINTER_BUTTON_STATE_PRESSED &&
+    if (state == WL_POINTER_BUTTON_STATE_PRESSED &&
         woodland_window_switcher_is_active(server)) {
         woodland_window_switcher_cancel(server);
     }
 
     if (woodland_multitask_view_is_active(server)) {
-        if (woodland_multitask_view_handle_button(server, event->button, event->state,
+        if (woodland_multitask_view_handle_button(server, button, state,
                                                   server->cursor->x, server->cursor->y)) {
             return;
         }
     }
     /* 窗口菜单处于激活态时，指针事件优先交由窗口菜单处理 */
     if (woodland_window_menu_is_active(server)) {
-        if (woodland_window_menu_handle_button(server, event->button, event->state,
+        if (woodland_window_menu_handle_button(server, button, state,
                                               server->cursor->x, server->cursor->y)) {
             return;
         }
@@ -399,9 +398,9 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
      * （labwc #1673）。
      */
     bool dragging = woodland_dnd_active(server);
-    wlr_seat_pointer_notify_button(server->seat, event->time_msec, event->button, event->state);
+    wlr_seat_pointer_notify_button(server->seat, time_msec, button, state);
     if (dragging) {
-        if (event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
+        if (state == WL_POINTER_BUTTON_STATE_RELEASED) {
             /*
              * 拖拽期间 hover / pressed 不会更新（motion 早就 return 了），
              * 所以"按下启动拖拽"那一下留下的高亮要在这里统一清掉。
@@ -412,7 +411,7 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
         return;
     }
 
-    if (event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
+    if (state == WL_POINTER_BUTTON_STATE_RELEASED) {
         if (server->interactive_click_to_finish) {
             return;
         }
@@ -474,13 +473,13 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
                 woodland_ssd_set_pressed(ssd_view, ssd_part);
                 break;
             case WOODLAND_SSD_TITLEBAR:
-                if (event->button == BTN_RIGHT) {
+                if (button == BTN_RIGHT) {
                     woodland_window_menu_show(ssd_view, server->cursor->x, server->cursor->y);
                     return;
                 }
                 {
                     double rx = server->cursor->x - ssd_view->scene_tree->node.x;
-                    if (event->button == BTN_LEFT && rx >= 0 && rx <= 28) {
+                    if (button == BTN_LEFT && rx >= 0 && rx <= 28) {
                         woodland_window_menu_show(ssd_view, server->cursor->x, server->cursor->y);
                         return;
                     }
@@ -518,6 +517,13 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
             }
         }
     }
+}
+
+static void server_cursor_button(struct wl_listener *listener, void *data)
+{
+    struct woodland_server *server = wl_container_of(listener, server, cursor_button);
+    struct wlr_pointer_button_event *event = data;
+    woodland_cursor_handle_button(server, event->time_msec, event->button, event->state);
 }
 
 static void server_cursor_axis(struct wl_listener *listener, void *data)

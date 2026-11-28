@@ -50,6 +50,8 @@ wayland_server = dependency('wayland-server')
 # 的地方必然有它
 wayland_client = dependency('wayland-client')
 xkbcommon = dependency('xkbcommon')
+# 触摸板 tap / 自然滚动 / 加速配置（wlroots 的 libinput 后端本来就依赖它）
+libinput_dep = dependency('libinput')
 pangocairo = dependency('pangocairo')
 cairo = dependency('cairo')
 # sd_notify / sd_listen_fds（socket activation + Type=notify 就绪报告）。

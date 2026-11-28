@@ -156,6 +156,15 @@ struct woodland_server {
     struct wl_list keyboards;                   // struct woodland_keyboard.link 链表头
     struct wlr_keyboard *debug_keyboard;        // --debug-ctl 虚拟键盘
     struct wl_listener new_input;               // backend->events.new_input 监听器
+    /* 触摸（src/seat/touch.c） */
+    struct wl_list touch_devices;               // struct woodland_touch_device.link
+    struct wl_list touch_points;                // struct woodland_touch_point.link
+    struct wl_listener touch_down;              // cursor->events.touch_*
+    struct wl_listener touch_up;
+    struct wl_listener touch_motion;
+    struct wl_listener touch_cancel;
+    struct wl_listener touch_frame;
+    struct wl_listener touch_layout_change;     // output_layout->events.change：重映射触摸屏
     struct wl_listener request_cursor;          // seat->events.request_set_cursor
     struct wl_listener request_set_selection;   // seat->events.request_set_selection
     struct wl_listener pointer_focus_change;    // seat->pointer_state.events.focus_change

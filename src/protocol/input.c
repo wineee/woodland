@@ -58,6 +58,8 @@ struct woodland_proto_input {
     struct wl_listener cursor_motion_absolute;
     struct wl_listener cursor_button;
     struct wl_listener cursor_axis;
+    struct wl_listener cursor_touch_down;
+    struct wl_listener cursor_touch_motion;
 };
 
 /* ==================== 光标钩子 ==================== */
@@ -103,6 +105,22 @@ static void input_handle_cursor_axis(struct wl_listener *listener,
                                      void *data) {
     struct woodland_proto_input *input =
         wl_container_of(listener, input, cursor_axis);
+    woodland_proto_idle_notify_activity(input->owner);
+    (void)data;
+}
+
+/* 触摸只续命 idle：触点分发本身在 src/seat/touch.c */
+static void input_handle_cursor_touch(struct wl_listener *listener, void *data) {
+    struct woodland_proto_input *input =
+        wl_container_of(listener, input, cursor_touch_down);
+    woodland_proto_idle_notify_activity(input->owner);
+    (void)data;
+}
+
+static void input_handle_cursor_touch_motion(struct wl_listener *listener,
+                                             void *data) {
+    struct woodland_proto_input *input =
+        wl_container_of(listener, input, cursor_touch_motion);
     woodland_proto_idle_notify_activity(input->owner);
     (void)data;
 }
@@ -325,6 +343,10 @@ bool woodland_proto_input_init(struct woodland_proto *proto) {
                           input_handle_cursor_button, "input.button");
     woodland_listener_connect(&input->cursor_axis, &server->cursor->events.axis,
                           input_handle_cursor_axis, "input.axis");
+    woodland_listener_connect(&input->cursor_touch_down, &server->cursor->events.touch_down,
+                          input_handle_cursor_touch, "input.touch_down");
+    woodland_listener_connect(&input->cursor_touch_motion, &server->cursor->events.touch_motion,
+                          input_handle_cursor_touch_motion, "input.touch_motion");
 
     return true;
 }
@@ -356,6 +378,12 @@ void woodland_proto_input_finish(struct woodland_proto *proto) {
     }
     if (input->cursor_axis.link.prev) {
         wl_list_remove(&input->cursor_axis.link);
+    }
+    if (input->cursor_touch_down.link.prev) {
+        wl_list_remove(&input->cursor_touch_down.link);
+    }
+    if (input->cursor_touch_motion.link.prev) {
+        wl_list_remove(&input->cursor_touch_motion.link);
     }
 
     free(input);

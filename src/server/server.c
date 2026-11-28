@@ -40,6 +40,7 @@
 #include "output.h"
 #include "protocol.h"
 #include "seat.h"
+#include "touch.h"
 #include "selfcheck.h"
 #include "server.h"
 #include "session_lock.h"
@@ -323,6 +324,7 @@ bool woodland_server_init(struct woodland_server *server)
      * 离开的客户端。
      */
     woodland_cursor_init_events(server);
+    woodland_touch_init(server);
 
     /* 上游协议：依赖 cursor / seat / output_layout / shell 都已就位，
      * 所以放在最后。内部只做接线，失败即整体失败（缺协议比半个协议好查）。 */
@@ -756,6 +758,7 @@ void woodland_server_finish(struct woodland_server *server)
     if (server->new_output_broadcast.link.prev) {
         wl_list_remove(&server->new_output_broadcast.link);
     }
+    woodland_touch_finish(server);
     woodland_cursor_finish_events(server);
 #if WOODLAND_HAVE_XWAYLAND
     woodland_xwayland_finish(server);
