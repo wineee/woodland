@@ -73,6 +73,14 @@ struct woodland_multitask_view {
     int selected_index; /* 当前选中的卡片索引，无卡片时为 -1 */
     int hovered_card;   /* 鼠标悬停的卡片索引，-1 表示无 */
     int hovered_close;  /* 鼠标悬停在关闭按钮上的卡片索引，-1 表示无 */
+
+    /* 拖拽卡片标题栏到工作区状态 */
+    int drag_card;       /* 正在按住/拖拽标题栏的卡片索引，-1 表示无 */
+    bool dragging;       /* 是否已超过阈值进入拖拽态 */
+    double drag_start_x; /* 按下时的相对输出坐标 */
+    double drag_start_y;
+    double drag_offset_x; /* 按下点相对卡片左上角的偏移 */
+    double drag_offset_y;
 };
 
 /**

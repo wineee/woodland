@@ -208,6 +208,51 @@ int main(void)
         &server, BTN_LEFT, WL_POINTER_BUTTON_STATE_PRESSED, 2, 2));
     assert(!woodland_multitask_view_is_active(&server));
 
+    /* 4b. 拖拽卡片标题栏将窗口移到其他工作区 */
+    woodland_multitask_view_open(&server);
+    assert(server.multitask_view->card_count == 1);
+    {
+        struct woodland_multitask_view *mv = server.multitask_view;
+        double start_x = mv->output_box.x + mv->cards[0].box.x + 12.0;
+        double start_y = mv->output_box.y + mv->cards[0].box.y + 10.0;
+
+        /* 按下标题栏 -> 移动超过阈值 -> Esc 取消拖拽（不关闭总览） */
+        assert(woodland_multitask_view_handle_button(
+            &server, BTN_LEFT, WL_POINTER_BUTTON_STATE_PRESSED, start_x, start_y));
+        assert(woodland_multitask_view_is_active(&server));
+        assert(mv->drag_card == 0 && !mv->dragging);
+        woodland_multitask_view_handle_motion(&server, start_x + 20.0, start_y + 20.0);
+        assert(mv->dragging);
+        assert(woodland_multitask_view_handle_key(&server, XKB_KEY_Escape, 0));
+        assert(woodland_multitask_view_is_active(&server));
+        assert(!mv->dragging && mv->drag_card == -1);
+        assert(v1.workspace == &ws1);
+        assert(woodland_multitask_view_handle_button(
+            &server, BTN_LEFT, WL_POINTER_BUTTON_STATE_RELEASED, start_x, start_y));
+
+        /* 再次按下标题栏并拖放到工作区 2 胶囊上松手 -> 窗口迁移到 ws2 */
+        double ws2_x = mv->output_box.x + mv->workspaces[1].box.x +
+                       mv->workspaces[1].box.width / 2.0;
+        double ws2_y = mv->output_box.y + mv->workspaces[1].box.y +
+                       mv->workspaces[1].box.height / 2.0;
+        assert(woodland_multitask_view_handle_button(
+            &server, BTN_LEFT, WL_POINTER_BUTTON_STATE_PRESSED, start_x, start_y));
+        woodland_multitask_view_handle_motion(&server, ws2_x, ws2_y);
+        assert(mv->dragging);
+        assert(mv->hovered_workspace == 1);
+        assert(woodland_multitask_view_handle_button(
+            &server, BTN_LEFT, WL_POINTER_BUTTON_STATE_RELEASED, ws2_x, ws2_y));
+        assert(woodland_multitask_view_is_active(&server));
+        assert(v1.workspace == &ws2);
+        assert(v1.scene_tree->node.parent == ws2.tree);
+        assert(mv->card_count == 0);
+        assert(mv->workspaces[0].window_count == 0);
+        assert(mv->workspaces[1].window_count == 1);
+    }
+    woodland_multitask_view_close(&server, false);
+    v1.workspace = &ws1;
+    wlr_scene_node_reparent(&v1.scene_tree->node, ws1.tree);
+
     /* 5. 超出上限截断计数：65 张卡片与 14 个工作区应上报 dropped_cards / dropped_workspaces */
     struct woodland_workspace extra_ws[WOODLAND_MULTITASK_MAX_WORKSPACES];
     for (int i = 0; i < WOODLAND_MULTITASK_MAX_WORKSPACES; i++) {

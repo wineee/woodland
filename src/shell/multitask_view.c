@@ -1149,6 +1149,8 @@ bool woodland_multitask_view_init(struct woodland_server *server)
     mv->hovered_workspace = -1;
     mv->hovered_card = -1;
     mv->hovered_close = -1;
+    mv->drag_card = -1;
+    mv->dragging = false;
     if (server->scene) {
         if (!mv_ensure_scene_trees(mv)) {
             if (mv->tree) {
@@ -1245,6 +1247,8 @@ void woodland_multitask_view_close(struct woodland_server *server, bool activate
     struct woodland_workspace *target_ws = mv->selected_workspace;
 
     mv->active = false;
+    mv->drag_card = -1;
+    mv->dragging = false;
     mv_clear_cards(mv);
     mv_clear_workspaces(mv);
     if (mv->backdrop) {
@@ -1319,6 +1323,8 @@ void woodland_multitask_view_handle_view_unmap(struct woodland_view *view)
             next_prefer = mv->cards[prev_selected - 1].view;
         }
     }
+    mv->drag_card = -1;
+    mv->dragging = false;
     mv_build_workspaces(mv);
     mv_build_cards(mv, next_prefer);
 }
@@ -1331,12 +1337,45 @@ static bool box_contains_point(const struct wlr_box *box, double x, double y)
            y >= box->y && y < (box->y + box->height);
 }
 
+static void mv_set_card_opacity(struct multitask_card_item *card, float opacity)
+{
+    if (!card) {
+        return;
+    }
+    if (card->frame_buffer) {
+        wlr_scene_buffer_set_opacity(card->frame_buffer, opacity);
+    }
+    if (card->thumb_buffer) {
+        wlr_scene_buffer_set_opacity(card->thumb_buffer, opacity);
+    }
+    if (card->icon_buffer) {
+        wlr_scene_buffer_set_opacity(card->icon_buffer, opacity);
+    }
+}
+
+static void mv_cancel_drag(struct woodland_multitask_view *mv)
+{
+    if (!mv) {
+        return;
+    }
+    if (mv->dragging && mv->drag_card >= 0 && mv->drag_card < mv->card_count) {
+        struct multitask_card_item *card = &mv->cards[mv->drag_card];
+        if (card->tree) {
+            wlr_scene_node_set_position(&card->tree->node, card->box.x, card->box.y);
+            mv_set_card_opacity(card, 1.0f);
+        }
+    }
+    mv->drag_card = -1;
+    mv->dragging = false;
+}
+
 static void mv_select_workspace(struct woodland_multitask_view *mv,
                                 struct woodland_workspace *ws)
 {
     if (!mv || !ws || mv->selected_workspace == ws) {
         return;
     }
+    mv_cancel_drag(mv);
     mv->selected_workspace = ws;
     if (mv->server->active_workspace != ws) {
         woodland_workspace_switch(mv->server, ws);
@@ -1348,6 +1387,34 @@ static void mv_select_workspace(struct woodland_multitask_view *mv,
     }
     woodland_trace_add("multitask", 0, "switch_workspace ws=%s cards=%d",
                        ws->name ? ws->name : "-", mv->card_count);
+}
+
+static void mv_move_view_to_workspace(struct woodland_multitask_view *mv,
+                                      struct woodland_view *view,
+                                      struct woodland_workspace *target_ws)
+{
+    if (!mv || !mv->server || !view || !target_ws || view->workspace == target_ws) {
+        return;
+    }
+    struct woodland_server *server = mv->server;
+    mv_cancel_drag(mv);
+
+    view->workspace = target_ws;
+    if (view->scene_tree && target_ws->tree) {
+        wlr_scene_node_reparent(&view->scene_tree->node, target_ws->tree);
+    }
+    if (woodland_focus_current(server) == view) {
+        woodland_focus_fallback(server);
+    }
+    woodland_signal_emit(&server->view_changed, view);
+    woodland_trace_add("multitask", view->id, "move_workspace target=%s",
+                       target_ws->name ? target_ws->name : "-");
+
+    mv_build_workspaces(mv);
+    mv_build_cards(mv, NULL);
+    if (mv->tree) {
+        mv_raise_tree(mv);
+    }
 }
 
 void woodland_multitask_view_handle_motion(struct woodland_server *server, double lx, double ly)
@@ -1374,6 +1441,27 @@ void woodland_multitask_view_handle_motion(struct woodland_server *server, doubl
         }
         if (new_ws >= 0) {
             mv_render_workspace_item(mv, new_ws);
+        }
+    }
+
+    if (mv->drag_card >= 0 && mv->drag_card < mv->card_count) {
+        struct multitask_card_item *card = &mv->cards[mv->drag_card];
+        if (!mv->dragging) {
+            double dx = rx - mv->drag_start_x;
+            double dy = ry - mv->drag_start_y;
+            if (dx * dx + dy * dy >= 36.0) {
+                mv->dragging = true;
+                if (card->tree) {
+                    wlr_scene_node_raise_to_top(&card->tree->node);
+                    mv_set_card_opacity(card, 0.75f);
+                }
+            }
+        }
+        if (mv->dragging && card->tree) {
+            int nx = (int)(rx - mv->drag_offset_x + 0.5);
+            int ny = (int)(ry - mv->drag_offset_y + 0.5);
+            wlr_scene_node_set_position(&card->tree->node, nx, ny);
+            return;
         }
     }
 
@@ -1416,13 +1504,39 @@ bool woodland_multitask_view_handle_button(struct woodland_server *server, uint3
     if (!woodland_multitask_view_is_active(server)) {
         return false;
     }
-    if (state != WL_POINTER_BUTTON_STATE_PRESSED) {
-        return true;
-    }
-
     struct woodland_multitask_view *mv = server->multitask_view;
     double rx = lx - mv->output_box.x;
     double ry = ly - mv->output_box.y;
+
+    if (state != WL_POINTER_BUTTON_STATE_PRESSED) {
+        if (button == BTN_LEFT && mv->drag_card >= 0) {
+            int idx = mv->drag_card;
+            bool was_dragging = mv->dragging;
+            if (!was_dragging) {
+                mv->drag_card = -1;
+                mv->dragging = false;
+                if (idx < mv->card_count) {
+                    mv->selected_index = idx;
+                    woodland_multitask_view_close(server, true);
+                }
+                return true;
+            }
+            struct woodland_workspace *target_ws = NULL;
+            for (int i = 0; i < mv->workspace_count; i++) {
+                if (box_contains_point(&mv->workspaces[i].box, rx, ry)) {
+                    target_ws = mv->workspaces[i].workspace;
+                    break;
+                }
+            }
+            struct woodland_view *view = (idx < mv->card_count) ? mv->cards[idx].view : NULL;
+            if (target_ws && view && view->workspace != target_ws) {
+                mv_move_view_to_workspace(mv, view, target_ws);
+            } else {
+                mv_cancel_drag(mv);
+            }
+        }
+        return true;
+    }
 
     if (button == BTN_RIGHT) {
         woodland_multitask_view_close(server, false);
@@ -1455,7 +1569,7 @@ bool woodland_multitask_view_handle_button(struct woodland_server *server, uint3
         }
     }
 
-    /* 2. 命中窗口卡片或其关闭按钮 */
+    /* 2. 命中窗口卡片或其关闭按钮 / 标题栏 */
     for (int i = 0; i < mv->card_count; i++) {
         if (box_contains_point(&mv->cards[i].box, rx, ry)) {
             struct woodland_view *v = mv->cards[i].view;
@@ -1464,6 +1578,16 @@ bool woodland_multitask_view_handle_button(struct woodland_server *server, uint3
                     woodland_trace_add("multitask", v->id, "close_view button=close_icon");
                     woodland_view_close(v);
                 }
+                return true;
+            }
+            if (ry >= mv->cards[i].box.y && ry < mv->cards[i].box.y + MV_CARD_HEADER_H) {
+                mv->drag_card = i;
+                mv->dragging = false;
+                mv->drag_start_x = rx;
+                mv->drag_start_y = ry;
+                mv->drag_offset_x = rx - mv->cards[i].box.x;
+                mv->drag_offset_y = ry - mv->cards[i].box.y;
+                mv->selected_index = i;
                 return true;
             }
             mv->selected_index = i;
@@ -1514,7 +1638,11 @@ bool woodland_multitask_view_handle_key(struct woodland_server *server, xkb_keys
 
     switch (sym) {
     case XKB_KEY_Escape:
-        woodland_multitask_view_close(server, false);
+        if (mv->dragging) {
+            mv_cancel_drag(mv);
+        } else {
+            woodland_multitask_view_close(server, false);
+        }
         return true;
     case XKB_KEY_s:
     case XKB_KEY_S:
