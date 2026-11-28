@@ -230,7 +230,8 @@ int main(void)
         assert(woodland_multitask_view_handle_button(
             &server, BTN_LEFT, WL_POINTER_BUTTON_STATE_RELEASED, start_x, start_y));
 
-        /* 再次按下标题栏并拖放到工作区 2 胶囊上松手 -> 窗口迁移到 ws2 */
+        /* 再次按下标题栏并拖放到工作区 2 胶囊上松手 -> 窗口迁移到 ws2，原焦点同步清理 */
+        server.focused_view = &v1;
         double ws2_x = mv->output_box.x + mv->workspaces[1].box.x +
                        mv->workspaces[1].box.width / 2.0;
         double ws2_y = mv->output_box.y + mv->workspaces[1].box.y +
@@ -245,6 +246,7 @@ int main(void)
         assert(woodland_multitask_view_is_active(&server));
         assert(v1.workspace == &ws2);
         assert(v1.scene_tree->node.parent == ws2.tree);
+        assert(server.focused_view == NULL);
         assert(mv->card_count == 0);
         assert(mv->workspaces[0].window_count == 0);
         assert(mv->workspaces[1].window_count == 1);

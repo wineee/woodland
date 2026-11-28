@@ -159,10 +159,10 @@ wctl get_tree | jq -c '.views[] | {id, title, minimized, focusable, restorable}'
 
 `minimized:true` + `focusable:false` + `restorable:true` 就是"它在 Alt+Tab 列表里、但点不过去也拿不到键盘"的官方解释。排查"为什么面板里有这一行 / 为什么自检红了"时先看这三个字段，不用去推条件。
 
-`self_check` 里多了一条 `switcher_snapshot`（`selfcheck.c:check_switcher`）：
+`self_check` 里多了一条 `switcher_snapshot`（`selfcheck.c:check_switcher`），并同步更新了 `workspace_membership`：
 
-- 未激活时要求快照为空（`count == 0` 且 `selected == -1`）——收尾没清干净会在这里显形；
-- 激活时要求每一项**都还在 `server->views` 里、且仍然 `woodland_view_restorable()`**（即"可聚焦，或者最小化了但恢复之后能聚焦"）。这条抓的是
+- 未激活时要求快照为空（`count == 0`、`selected == -1` 且 `woodland_window_switcher_preview_view() == NULL`）——收尾漏清或未归还预览窗口会在这里显形；
+- 激活时要求每一项**都还在 `server->views` 里、且仍然 `woodland_view_restorable()`**（即"可聚焦，或者最小化了但恢复之后能聚焦"）；同时 `check_workspace_membership` 会对正在 `sw->preview_tree` 中临时抬升预览的那唯一视图做精准放行（要求 `preview == view && view->scene_tree->node.parent == preview_tree`）。这条抓的是
   `view_unmapped` 监听的漏挂/漏摘：快照里留着已卸载的窗口，面板画的是陈旧行；留着已 free 的
   窗口，渲染时读 `view->title` 就是 UAF。两者从面板外观上都看不出来（最多少一行），只有拿链表
   对照才说得清。先查链表成员（纯指针比较）再查 restorable（会解引用），顺序反过来就可能崩在

@@ -197,6 +197,14 @@ void woodland_cursor_process_motion(struct woodland_server *server, uint32_t tim
         wlr_seat_pointer_notify_clear_focus(server->seat);
         return;
     }
+    if (woodland_window_switcher_is_active(server) && !woodland_dnd_active(server)) {
+        ssd_update_hover(server, NULL, WOODLAND_SSD_NONE);
+        woodland_cursor_set(server, "default");
+        if (server->seat) {
+            wlr_seat_pointer_notify_clear_focus(server->seat);
+        }
+        return;
+    }
 
     /*
      * 拖拽优先于一切光标策略：图标要跟手、投放目标每帧都要重算，而 SSD

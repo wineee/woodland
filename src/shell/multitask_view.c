@@ -28,6 +28,7 @@
 #include "effect.h"
 #include "focus.h"
 #include "icon.h"
+#include "layer.h"
 #include "multitask_view.h"
 #include "output.h"
 #include "scene.h"
@@ -1425,10 +1426,26 @@ static void mv_move_view_to_workspace(struct woodland_multitask_view *mv,
     struct woodland_server *server = mv->server;
     mv_cancel_drag(mv);
 
+    bool was_focused = (server->focused_view == view || woodland_focus_current(server) == view);
     woodland_workspace_move_view(view, target_ws);
-    if (woodland_focus_current(server) == view) {
-        woodland_focus_fallback(server);
+    if (was_focused) {
+        if (server->seat) {
+            woodland_focus_fallback(server);
+        } else {
+            if (server->focused_view == view) {
+                server->focused_view = NULL;
+            }
+            if (view->activated &&
+                (view->type != WOODLAND_VIEW_XDG ||
+                 (view->xdg_toplevel && view->xdg_toplevel->base &&
+                  view->xdg_toplevel->base->initialized))) {
+                woodland_view_set_activated(view, false);
+            } else {
+                view->activated = false;
+            }
+        }
     }
+    woodland_layer_update_top_layer_visibility(server);
     woodland_signal_emit(&server->view_changed, view);
     woodland_trace_add("multitask", view->id, "move_workspace target=%s",
                        target_ws->name ? target_ws->name : "-");
@@ -1481,8 +1498,8 @@ void woodland_multitask_view_handle_motion(struct woodland_server *server, doubl
             }
         }
         if (mv->dragging && card->tree) {
-            int nx = (int)(rx - mv->drag_offset_x + 0.5);
-            int ny = (int)(ry - mv->drag_offset_y + 0.5);
+            int nx = (int)lround(rx - mv->drag_offset_x);
+            int ny = (int)lround(ry - mv->drag_offset_y);
             wlr_scene_node_set_position(&card->tree->node, nx, ny);
             return;
         }

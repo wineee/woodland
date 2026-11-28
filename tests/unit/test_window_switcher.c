@@ -426,8 +426,9 @@ int main(void)
         assert(backdrop_node->type == WLR_SCENE_NODE_RECT && backdrop_node->enabled);
         struct wlr_scene_rect *backdrop_rect = wlr_scene_rect_from_node(backdrop_node);
         assert(backdrop_rect->width >= 800 && backdrop_rect->height >= 600);
-        assert(&preview_tree->node ==
-               wl_container_of(backdrop_node->link.next, (struct wlr_scene_node *)NULL, link));
+        struct wlr_scene_node *next_node =
+            wl_container_of(backdrop_node->link.next, next_node, link);
+        assert(next_node == &preview_tree->node);
 
         int enabled_bufs = 0;
         bool saw_preview_before_panel = false;

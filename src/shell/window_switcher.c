@@ -40,9 +40,11 @@
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_output_layout.h>
+#include <wlr/types/wlr_seat.h>
 #include <wlr/util/box.h>
 #include <wlr/util/log.h>
 
+#include "dnd.h"
 #include "focus.h"
 #include "icon.h"
 #include "multitask_view.h"
@@ -965,6 +967,9 @@ static void switcher_finish(struct woodland_server *server, bool apply)
     } else {
         woodland_trace_add("switcher", 0, "cancel");
     }
+    if (server->cursor && server->seat) {
+        woodland_cursor_process_motion(server, 0);
+    }
 }
 
 /*
@@ -1251,6 +1256,9 @@ bool woodland_window_switcher_begin(struct woodland_server *server, bool forward
     /* 拖拽图标树必须始终在最顶层（满足 selfcheck 的 dnd_icon 不变量） */
     if (server->dnd.drag && server->dnd.icons) {
         wlr_scene_node_raise_to_top(&server->dnd.icons->node);
+    }
+    if (server->seat && !woodland_dnd_active(server)) {
+        wlr_seat_pointer_notify_clear_focus(server->seat);
     }
 
     woodland_trace_add("switcher", origin ? origin->id : 0, "begin n=%d dir=%s sel=%d", sw->count,
